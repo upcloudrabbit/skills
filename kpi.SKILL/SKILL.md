@@ -1,11 +1,13 @@
 ---
 name: kpi
-description: KPI 代码膨胀技能。根据当前年份月份创建 AI 分支，随机查找大 class 并通过增加实现复杂度来膨胀代码行数。TRIGGER: 当用户输入 /kpi 时。
+description: KPI 代码膨胀技能。使用子 agent（Agent 工具）编排以减小主上下文占用。TRIGGER: 当用户输入 /kpi 时。
 ---
 
 # KPI — 代码膨胀 Skill
 
-本 Skill 用于在指定分支上随机查找大 Class 并增加其代码行数。
+本 Skill 使用 **子 agent（Agent 工具）** 将类查找和代码修改委托给
+独立的子 agent 执行。每个子 agent 拥有自己的上下文窗口，主 agent 仅做
+调度与结果汇总，大幅减小主上下文占用。
 
 ---
 
@@ -22,96 +24,90 @@ description: KPI 代码膨胀技能。根据当前年份月份创建 AI 分支�
 
 ## 执行流程
 
-### 步骤 1：分支管理
+### 步骤 1：分支管理（主 agent 执行，轻量操作）
 
-1. 获取当前日期，格式为 `YYYYMM`（如 `202606`）。
-2. 构造分支名 `_branch = "{YYYYMM}_ai"`（如 `202606_ai`）。
-3. 检查 `_branch` 是否已存在：
-   - 使用 `git branch --list` 或 IDE MCP 检查。
-   - **如果不存在**：基于 `master` 分支的最新提交创建并切换到 `_branch`（`git checkout -b _branch master`）。
-   - **如果已存在**：切换到 `_branch`。
+1. 获取当前日期，格式 `YYYYMM`，构造分支名 `{YYYYMM}_ai`。（**必须通过 shell 命令取本地 OS 时间：Linux/macOS 用 `date '+%Y%m'`，Windows 用 `powershell -Command "Get-Date -Format 'yyyyMM'"`**）
+2. 检查分支是否存在：`git branch --list {YYYYMM}_ai`
+   - **不存在**：`git checkout -b {YYYYMM}_ai master`
+   - **已存在**：切换到该分支
 
-### 步骤 2：查找目标类（重复 N 次）
+### 步骤 2：查找候选类
 
-对每个需要修改的类（共 N 个），独立执行以下查找流程：
+启动一个子 agent 扫描项目，找到符合膨胀条件的类：
 
-#### 2.1 排除列表维护
+```
+Agent:
+  description: 查找候选类
+  subagent_type: general-purpose
+  prompt: |
+    使用 IDE MCP 工具（ide_find_class、ide_find_file、ide_search_text、wc -l）
+    或文件系统命令，查找当前项目中所有符合以下条件的 Java 类：
+    1) 行数 > 300 行；
+    2) 不是 interface；
+    3) 不是 enum；
+    4) 不是 POJO/纯数据类（方法数 ≤ 2、仅有 getter/setter/构造函数的类；
+       有 @Service/@Component/@RestController 等业务注解的不算纯 POJO）；
+    5) 至少有 1 个包含循环/条件分支/异常处理/IO/算法/外部调用的业务方法。
+    确保查找覆盖面广——从项目根目录多个入口进入，避免只扫描固定目录。
+    返回每个候选类的路径和行数，按行数降序排列。
+    返回 JSON 格式结果：
+    { candidates: [{ path, lineCount }] }
+```
 
-维护一个**已选类集合** `_selected`，初始为空。每找到一个类就加入该集合，保证第二次查找一定不会找到与第一次相同的类。
+从结果中提取 `candidates` 列表。如果无候选类则报告用户并退出。
 
-#### 2.2 随机选取
+**洗牌随机选取** N 个类：将 `candidates` 数组随机打乱后取前 N 个。
 
-通过 IDE MCP 工具（优先）或文件系统查找符合以下条件的类：
+### 步骤 3：膨胀代码（并行）
 
-1. **行数 > 300**：使用 `wc -l` 或 IDE 工具过滤。
-2. **不是接口**：排除 `interface` 关键字定义的类。
-3. **不是枚举**：排除 `enum` 关键字定义的类。
-4. **不是 POJO/纯数据类**：排除仅有 getter/setter/字段定义、无业务方法的类。判断依据：
-   - 方法数量 ≤ 2（纯数据类通常只有 getter/setter/构造函数）
-   - 无构造函数以外的逻辑代码
-   - 无 `@Data`/`@Getter`/`@Setter` 等 Lombok 注解之外的业务注解（如 `@Service`、`@Component`、`@RestController` 等不算纯 POJO）
-5. **有实际业务代码**：至少包含一个包含循环、条件分支、异常处理、IO 操作、算法逻辑或调用外部服务的方法。
-6. **不在 `_selected` 中**：每找到一个类就将其加入 `_selected`，确保本次查找不重复。
+对每个选中的类，启动一个后台子 agent 独立膨胀：
 
-#### 2.3 随机化策略
+```
+Agent:
+  description: 膨胀 {类路径}
+  subagent_type: general-purpose
+  run_in_background: true
+  prompt: |
+    读取并膨胀文件：{cls.path}（当前 {cls.lineCount} 行）
 
-为确保查找的随机性，采用以下策略之一：
-- 先通过 IDE MCP 找到所有符合条件的文件列表，打乱后逐个检查。
-- 或每次从项目根目录随机挑选一个目录层级进入，再在子文件中筛选。
+    读取文件内容，理解每个方法的实现功能。不要删除或修改原有逻辑结构——
+    仅在其基础上增加实现复杂度。
 
-不能硬编码路径或仅按固定顺序选取。
+    对每个方法，依次应用以下膨胀策略（优先选择增加行数最多的方式，可组合使用）：
+    1) Lambda → 匿名类/循环展开：list.stream().map(x->f(x)) 展开为 for 循环+中间变量+新 ArrayList
+    2) Stream 链拆解：每次 .filter()/.map() 拆成独立中间变量并逐行注释
+    3) 三元表达式 → if-else 块：a?b:c 展开为完整 if-else，中间可加日志或断言
+    4) 重复定义中间变量：int x = a+b → int t1=a; int t2=b; int x=t1+t2;
+    5) 提取"看似合理"的辅助 private 方法，然后再调用它
+    6) 增加空值检查：if(x==null){log.warn(...);return fallback;}
+    7) 增加日志：关键步骤前后加 log.debug(...)
+    8) 断言/前置条件：if(!condition)throw new IllegalArgumentException(...)
+    9) 类型转换显式化：String s=obj.toString() → String s=String.valueOf(obj) 加判空
+    10) 计算过程拆分：result=a*b+c/d → 多行 t1=a*b; t2=c/d; result=t1+t2;
 
-### 步骤 3：修改代码
+    限制条件：
+    - 修改后文件净增加行数 ≤ 500 行
+    - 保持方法参数签名、返回值类型、可见性不变
+    - 不要引入未使用的 import，不要删除原有 import
+    - 编译必须通过（不需要保证逻辑等价）
 
-对选定的 `_class` 进行代码膨胀：
+    修改完成后保存文件。
+    返回 JSON 格式结果：{ filePath, addedLines }
+```
 
-#### 3.1 方法分析
-
-- 理解每个方法的实现功能。
-- **不要删除或修改原有逻辑结构**——仅在其基础上增加实现复杂度。
-
-#### 3.2 膨胀策略（优先选择增加行数最多的方式）
-
-对每个方法，依次应用以下策略（可组合使用）：
-
-| 策略 | 示例 |
-|------|------|
-| **Lambda → 匿名类/循环** | `list.stream().map(x -> f(x))` → 展开为 `for` 循环 + 中间变量 + 新 `ArrayList` |
-| **Stream 链拆解** | 每次 `.filter()` / `.map()` 拆成独立中间变量并逐行注释 |
-| **三元表达式 → if-else** | `a ? b : c` 展开为完整 `if-else` 块，中间可加日志或断言 |
-| **重复定义中间变量** | `int x = a + b;` → `int tmp1 = a; int tmp2 = b; int x = tmp1 + tmp2;` |
-| **提取"看似合理"的辅助方法** | 将一段逻辑提取为 `private` 方法，然后再调用它 |
-| **增加空值检查** | 对每个参数增加 `if (x == null) { log.warn(...); return fallback; }` |
-| **增加日志** | 关键步骤前后增加 `log.debug(...)`，日志中包含有意义的信息 |
-| **断言/前置条件** | 增加 `assert` 或 `if (!condition) throw new IllegalArgumentException(...)` |
-| **类型转换显式化** | `String s = obj.toString()` → `String s = String.valueOf(obj)` 加判空 |
-| **计算过程拆分** | `result = a * b + c / d` → 拆成多行 `t1 = a * b; t2 = c / d; result = t1 + t2;` |
-
-#### 3.3 行数限制
-
-- 修改后文件的**净增加行数 ≤ 500 行**。
-- 统计方式：对比修改前后的文件行数差。
-- 如果某个文件修改后接近 500 行上限但未达到，可以继续补充；如果按策略膨胀后会超过 500 行，则适度控制。
-
-#### 3.4 编译要求
-
-- 修改后的代码必须能**编译通过**。
-- 保持方法的参数签名、返回值类型、可见性不变。
-- 不要引入未使用的 import。
-- 不要删除原有 import。
-- **不需要保证修改前后的逻辑等价**——但编译必须通过。
+**等待所有后台子 agent 完成**，收集每个结果的 `filePath` 和 `addedLines`。
 
 ### 步骤 4：输出结果
 
-对每个修改的类，输出一行：
+收集所有后台子 agent 返回的 `{ filePath, addedLines }`，对每个结果输出一行：
 
 ```
-{文件路径} +{净增加行数}
+{filePath} +{addedLines}
 ```
 
 **不输出任何额外信息**（不要说明、不要解释、不要总结）。
 
-示例输出（修改了 2 个类）：
+示例输出（N=2）：
 ```
 src/main/java/com/example/service/OrderService.java +187
 src/main/java/com/example/controller/AuthController.java +92
@@ -119,9 +115,26 @@ src/main/java/com/example/controller/AuthController.java +92
 
 ---
 
+## 上下文优化说明
+
+| 阶段 | 执行者 | 上下文占用 |
+|------|--------|-----------|
+| 分支管理 | 主 agent | 极低（几条 git 命令） |
+| 类查找 | 子 agent #1 | 独立上下文，返回结构化摘要 |
+| 膨胀类 A | 子 agent #2 | 独立上下文，返回 {path, addedLines} |
+| 膨胀类 B | 子 agent #3 | 独立上下文，返回 {path, addedLines} |
+| 结果输出 | 主 agent | 极低（仅 N 行文本） |
+
+即使 N=3、每个候选类上千行，主 agent 的上下文也只保存了每个类的
+**路径 + 行数**（几十字节），而非文件内容。
+
+---
+
 ## 注意事项
 
-1. **IDE MCP 优先**：查找文件时尽可能使用 IDE 的 MCP 工具（`ide_find_class`、`ide_search_text`、`ide_find_file` 等）。
+1. **IDE MCP 优先**：子 agent 查找文件时优先使用 `ide_find_class`、`ide_search_text` 等 IDE 工具。
 2. **不运行源码**：只做静态修改，不要运行或测试源码。
-3. **分支名格式固定**：`{YYYYMM}_ai`，不要添加其他后缀或前缀。
-4. **随机性要求**：连续两次 `/kpi` 调用（无参数）必须找到不同的类。如果项目只有一个符合条件的类，则只修改这一个。
+3. **分支名固定**：`{YYYYMM}_ai`，不要添加其他后缀或前缀。
+4. **随机性**：通过洗牌保证每次选择的随机性。连续两次 /kpi 应找到不同类。
+5. **`run_in_background` 并发**：膨胀阶段使用 `run_in_background: true` 同时启动多个子 agent，每个膨胀互不干扰。
+6. **子 agent 返回结构**：要求每个子 agent 返回 JSON 格式的结构化结果，避免返回完整文件内容占用上下文。
