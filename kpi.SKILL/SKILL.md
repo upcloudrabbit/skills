@@ -22,11 +22,23 @@ description: KPI 代码膨胀技能。使用子 agent（Agent 工具）编排以
 
 ---
 
+### 日期命令变量
+
+定义会话变量 `_dateCmdMonth`，主 agent 每次执行前根据当前 OS 设置：
+
+| 变量 | Linux/macOS | Windows |
+|------|------------|---------|
+| `_dateCmdMonth`（分支命名） | `` `date '+%Y%m'` `` | `` `powershell -Command "Get-Date -Format 'yyyyMM'"` `` |
+
+所有 prompt 中使用 `{_dateCmdMonth}` 引用日期命令，不再重复书写完整命令。
+
+---
+
 ## 执行流程
 
 ### 步骤 1：分支管理（主 agent 执行，轻量操作）
 
-1. 获取当前日期，格式 `YYYYMM`，构造分支名 `{YYYYMM}_ai`。（**必须通过 shell 命令取本地 OS 时间：Linux/macOS 用 `date '+%Y%m'`，Windows 用 `powershell -Command "Get-Date -Format 'yyyyMM'"`**）
+1. 获取当前日期，格式 `YYYYMM`，构造分支名 `{YYYYMM}_ai`。（**必须通过 `{_dateCmdMonth}` 获取**）
 2. 检查分支是否存在：`git branch --list {YYYYMM}_ai`
    - **不存在**：`git checkout -b {YYYYMM}_ai master`
    - **已存在**：切换到该分支
@@ -138,3 +150,4 @@ src/main/java/com/example/controller/AuthController.java +92
 4. **随机性**：通过洗牌保证每次选择的随机性。连续两次 /kpi 应找到不同类。
 5. **`run_in_background` 并发**：膨胀阶段使用 `run_in_background: true` 同时启动多个子 agent，每个膨胀互不干扰。
 6. **子 agent 返回结构**：要求每个子 agent 返回 JSON 格式的结构化结果，避免返回完整文件内容占用上下文。
+7. **子 agent 容错**：后台子 agent 可能因超时、工具不可用等原因返回 null 或无效结果。主 agent 应检查每个返回值，失败的任务记录日志后继续处理其余任务。查找阶段失败则报错退出，膨胀阶段失败则跳过该类继续处理其余类。

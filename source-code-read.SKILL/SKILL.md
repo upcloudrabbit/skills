@@ -29,20 +29,18 @@ description: >
 
 ## 系统主题检测
 
-进入 skill 后，**第一步先检测当前 OS 系统主题**，定义 Mermaid 主题变量 `_mermaidThemeInit`：
+每次执行 init/reinit/update/byCase 指令前，主 agent 先执行系统主题检测，设置 Mermaid 主题变量 `_mermaidThemeInit`。
 
-```
-检测命令（兼容多平台）：
-- Linux:   gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null
-- macOS:   defaults read -g AppleInterfaceStyle 2>/dev/null
-- Windows: powershell -Command "(Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme"
+1. **执行检测命令**（兼容多平台，依次尝试，取第一个有输出的结果）：
+   - Linux:   `gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null`
+   - macOS:   `defaults read -g AppleInterfaceStyle 2>/dev/null`
+   - Windows: `powershell -Command "(Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme"`
 
-判定逻辑：
-- 结果含 "dark" 或 "Dark" 或 "0" → 暗色主题 → _mermaidThemeInit = "%%{init: {'theme':'dark'}}%%"
-- 其他（含 "light"、"default"、"1"、空） → 明亮主题 → _mermaidThemeInit = "%%{init: {'theme':'neutral'}}%%"
-```
+2. **判定并设置变量**：
+   - 结果含 "dark" 或 "Dark" 或 "0" → `_mermaidThemeInit = "%%{init: {'theme':'dark'}}%%"`
+   - 其他（含 "light"、"default"、"1"、空） → `_mermaidThemeInit = "%%{init: {'theme':'neutral'}}%%"`
 
-将 `_mermaidThemeInit` 记为会话变量，后续所有生成文档中的 Mermaid 图**顶部都必须包含 `{_mermaidThemeInit}`**。
+设置完成后，后续所有生成文档中的 Mermaid 图**顶部都必须包含 `{_mermaidThemeInit}`**。
 
 ---
 
@@ -63,9 +61,20 @@ description: >
 | 架构/模块依赖 | `` ```mermaid `` + `{_mermaidThemeInit}` + graph | 层次列表 |
 | 内存布局/结构体 | `` ```text `` 标注高/低地址 | — |
 
+### 日期命令变量
+
+定义会话变量 `_dateCmdFull` 和 `_dateCmdCompact`，主 agent 在每次执行指令前根据当前 OS 设置：
+
+| 变量 | Linux/macOS | Windows |
+|------|------------|---------|
+| `_dateCmdFull`（文档时间戳） | `date '+%Y-%m-%d %H:%M'` | `powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"` |
+| `_dateCmdCompact`（归档命名） | `date '+%Y%m%d%H%M%S'` | `powershell -Command "Get-Date -Format 'yyyyMMddHHmmss'"` |
+
+所有 agent prompt 中使用 `{_dateCmdFull}` / `{_dateCmdCompact}` 引用日期命令，不再重复书写完整命令。
+
 ### 文档规范
 
-- **日期**：文档顶部标注 `YYYY-MM-DD HH:mm` 格式的上次修改时间，**必须通过 shell 命令获取本地操作系统时间**（兼容 Windows 和 Linux：Linux/macOS 用 `date '+%Y-%m-%d %H:%M'`，Windows 用 `powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`），不得由 agent 自行推断
+- **日期**：文档顶部标注 `YYYY-MM-DD HH:mm` 格式的上次修改时间，**必须通过 `{_dateCmdFull}` 获取本地操作系统时间**，不得由 agent 自行推断
 - **命名**：文档名用**中文**（术语表等保留原文的除外）
 - **代码引用**：工程内用**相对路径**，工程外用**绝对路径**，文档末尾统一列出
 - **概念解释**：每个概念含定义、作用、代码示例或使用场景
@@ -135,7 +144,7 @@ description: >
        文档命名：{模块名}.md（中文名）
 
        文档结构要求：
-       - 顶部标注上次修改日期（YYYY-MM-DD HH:mm 格式），**日期必须通过 shell 命令获取（兼容 Windows/Linux）：`date '+%Y-%m-%d %H:%M'` 或 `powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`，不得自行推断**
+       - 顶部标注上次修改日期（YYYY-MM-DD HH:mm 格式），**日期必须通过 `{_dateCmdFull}` 获取，不得自行推断**
        - 包含"重点关注"章节（checkbox 列表）
        - 功能概述
        - 核心概念（每个概念：定义、作用、代码示例、三维评估）
@@ -169,7 +178,7 @@ description: >
 
        摘要.md 结构：
        # {项目名称} 源码阅读指南
-       > 上次修改：通过 shell 命令获取 (YYYY-MM-DD HH:mm，兼容 Windows/Linux)
+       > 上次修改：通过 {_dateCmdFull} 获取
 
        ## 项目概览
        项目名称、技术栈、构建方式、项目规模、许可证
@@ -187,7 +196,7 @@ description: >
        项目信息参考：名称={projectName}，技术栈={techStack}，构建={buildMethod}
    ```
 
-3. **输出结果**：一行列出创建的文件，例如：
+8. **输出结果**：一行列出创建的文件，例如：
    ```
    init 完成：
      - 创建 认证模块.md
@@ -212,7 +221,7 @@ description: >
      subagent_type: general-purpose
      prompt: |
        归档 {_path} 下的文档文件：
-       1) 生成时间戳（兼容 Windows/Linux）：`date '+%Y%m%d%H%M%S'` 或 `powershell -Command "Get-Date -Format 'yyyyMMddHHmmss'"`
+       1) 生成时间戳：`{_dateCmdCompact}`
        2) 创建归档目录：{_path}/archive_<时间戳>/
        3) 将 {_path} 下所有 .md 文件复制到归档目录中
        4) 如果有 images/ 子目录也一并复制
@@ -233,8 +242,6 @@ description: >
        返回 JSON 格式结果：
        { docs: [{ path, title, sections }] }
    ```
-   如果无文档则提示退出——`reinit` 需要已有文档为输入。
-
 5. **重新整理（并行）** — 对每个文档（排除 `摘要.md`）启动后台子 agent 整理：
    遍历 `docs` 列表，对每个文档执行：
    ```
@@ -255,7 +262,7 @@ description: >
           - 关键代码补充三维评估（好处/替代方案/风险）
        3) 完善结构：
           - 补充文档顶部的"重点关注"checkbox 章节
-          - 更新"上次修改"日期为当前时间（**必须通过 shell 命令获取，兼容 Windows/Linux：`date '+%Y-%m-%d %H:%M'` 或 `powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`**）
+          - 更新"上次修改"日期为当前时间（**必须通过 `{_dateCmdFull}` 获取**）
           - 确保文档名为中文（术语表等特殊文档除外）
           - 补全或修复 Mermaid 图（每个图首行必须插入 `{_mermaidThemeInit}`）
        4) 不丢失任何原有有效信息
@@ -278,7 +285,7 @@ description: >
 
        摘要.md 结构：
        # 项目源码阅读指南
-       > 上次修改：通过 shell 命令获取 (兼容 Windows/Linux)
+       > 上次修改：通过 {_dateCmdFull} 获取
 
        ## 项目概览
        （如原 摘要.md 中有项目概览信息则保留）
@@ -323,7 +330,7 @@ description: >
        操作规范：
        1) 读取当前文档内容
        2) 定位到目标章节并执行变更（新增/修改/删除）
-       3) 更新文档顶部的"上次修改"日期为当前时间（**必须通过 shell 命令获取，兼容 Windows/Linux：`date '+%Y-%m-%d %H:%M'` 或 `powershell -Command "Get-Date -Format 'yyyy-MM-dd HH:mm'"`**）
+       3) 更新文档顶部的"上次修改"日期为当前时间（**必须通过 `{_dateCmdFull}` 获取**）
        4) 所有新增的图优先使用 Mermaid 绘制（每个 Mermaid 代码块首行插入 `{_mermaidThemeInit}`）
        5) 新增的概念需包含定义、作用、代码示例和三维评估
 
@@ -392,7 +399,7 @@ description: >
 
        文档结构：
        # 场景分析：{场景名}
-       > 上次修改：通过 shell 命令获取 (YYYY-MM-DD HH:mm，兼容 Windows/Linux)
+       > 上次修改：通过 {_dateCmdFull} 获取
 
        ## 场景描述
        （用户提供的场景说明）
@@ -446,5 +453,7 @@ description: >
 3. **输出简洁**：非 `help` 指令执行完成后，只输出文件变更清单，不做延伸说明。
 4. **`_path` 记忆**：同一会话中 `init` 设定的 `_path` 可被 `reinit`/`update`/`byCase` 沿用。
 5. **归档保留**：`reinit` 生成的归档目录在执行后保留，不会自动删除。
-6. **`run_in_background` 并发**：文档生成、重新整理等可并行任务使用 `run_in_background: true` 启动多个子 agent 同时执行，完成后汇总结果。
+6. **`run_in_background` 并发**：文档生成、重新整理等可并行任务使用 `run_in_background: true` 启动多个子 agent 同时执行，完成后汇总结果。若模块较多（>10），应分批启动，每批 5-8 个 agent 并发，避免资源争抢。
 7. **子 agent 返回结构**：要求每个子 agent 返回 JSON 格式的结构化结果，避免返回完整文件内容占用上下文。
+8. **子 agent 容错**：后台子 agent 可能因超时、工具不可用等原因返回 null 或无效结果。主 agent 应检查每个返回值，失败的任务记录日志后继续处理其余任务，避免单点失败阻塞全流程。关键步骤（环境检测、模块扫描）失败则报错退出。
+9. **reinit 中断风险**：reinit 按"先归档再整理"顺序执行，若整理阶段中断，归档目录已存在但文档可能未全部更新。中断后可检查 `archive_*` 目录与当前文档的差异，手动整理未更新部分。
