@@ -1,6 +1,6 @@
 ---
 name: kpi
-description: KPI 代码膨胀技能。使用子 agent（Agent 工具）编排以减小主上下文占用。TRIGGER: 当用户输入 /kpi 时。
+description: "KPI 代码膨胀技能。使用子 agent（Agent 工具）编排以减小主上下文占用。TRIGGER: 当用户输入 /kpi 时。"
 ---
 
 # KPI — 代码膨胀 Skill

@@ -1,11 +1,10 @@
 ---
 name: source-code-read
 description: >
-  Source code reading and documentation skill. Uses sub-agents (Agent tool) for
-  heavy analysis to minimize main context usage. Generates structured Markdown
-  documentation from source code projects. TRIGGER: When the user types
-  /source-code-read, or mentions "阅读源码", "源码分析", "code reading",
-  "document code", "项目文档", or asks you to analyze a project.
+  源码阅读与文档生成技能。使用子 agent（Agent 工具）进行重分析以减小主上下文占用。
+  从源码项目生成结构化 Markdown 文档。
+  TRIGGER: 当用户输入 /source-code-read，或提及"阅读源码"、"源码分析"、"code reading"、
+  "document code"、"项目文档"，或要求你分析一个项目时触发。
 ---
 
 # Source Code Read — 源码阅读与文档生成 Skill
