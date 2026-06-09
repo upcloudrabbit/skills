@@ -1,12 +1,12 @@
 @echo off
 setlocal enabledelayedexpansion
 
-REM package.bat — Package all .SKILL directories into zip files under resources/
+REM package.bat — Package all skill directories into zip files under resources/
 REM
 REM Usage: package.bat
 REM
-REM For each <name>.SKILL\ directory in the project root, creates
-REM resources\<name>.zip, ready for import by cc-switch or similar tools.
+REM For each directory in the project root that contains a SKILL.md file,
+REM creates resources\<name>.zip, ready for import by cc-switch or similar tools.
 
 set "ROOT_DIR=%~dp0"
 set "RESOURCES_DIR=%ROOT_DIR%resources"
@@ -16,26 +16,22 @@ mkdir "%RESOURCES_DIR%"
 
 set COUNT=0
 
-for /d %%D in ("%ROOT_DIR%*.SKILL") do (
-    set "DIR_NAME=%%~nxD"
-    set "SKILL_NAME=%%~nD"
+for /d %%D in ("%ROOT_DIR%*") do (
+    if exist "%%D\SKILL.md" (
+        set "DIR_NAME=%%~nxD"
+        set "ZIP_FILE=%RESOURCES_DIR%\!DIR_NAME!.zip"
 
-    REM Remove trailing .skill if double extension was captured
-    REM Note: %%~nD already strips the last extension, so "kpi.SKILL" -> "kpi"
-    REM This is the correct behavior out of the box.
+        echo Packaging: !DIR_NAME! -^> !ZIP_FILE!
 
-    set "ZIP_FILE=%RESOURCES_DIR%\!SKILL_NAME!.zip"
+        REM PowerShell-based zip (built into Windows 7+)
+        powershell -NoProfile -Command "& { Add-Type -A 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::CreateFromDirectory('%%D', '!ZIP_FILE!') }"
 
-    echo Packaging: !DIR_NAME! -^> !ZIP_FILE!
-
-    REM PowerShell-based zip (built into Windows 7+)
-    powershell -NoProfile -Command "& { Add-Type -A 'System.IO.Compression.FileSystem'; [System.IO.Compression.ZipFile]::CreateFromDirectory('%%D', '!ZIP_FILE!') }"
-
-    set /a COUNT+=1
+        set /a COUNT+=1
+    )
 )
 
 if !COUNT! equ 0 (
-    echo No *.SKILL directories found in %ROOT_DIR%.
+    echo No skill directories (with SKILL.md) found in %ROOT_DIR%.
     rmdir "%RESOURCES_DIR%" 2>nul
     exit /b 0
 )
