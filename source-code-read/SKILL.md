@@ -78,7 +78,7 @@ description: >
 - **命名**：文档名用**中文**（术语表等保留原文的除外）
 - **代码引用**：工程内用**相对路径**，工程外用**绝对路径**，文档末尾统一列出
 - **概念解释**：每个概念含定义、作用、代码示例或使用场景
-- **重点关注**：文档开头列出重点章节的 checkbox 列表
+- **重点关注**：文档开头列出重点章节
 - **三维评估**：关键代码分析**好处**（为什么）、**替代方案**（其他方式及权衡）、**风险**（不这么实现的问题）
 - **摘要同步**：新增/删除/改名文档或内容大改时，同步更新 `摘要.md` 的模块功能摘要表
 
@@ -87,7 +87,7 @@ description: >
 | 变量 | 含义 | 设置时机 |
 |------|------|----------|
 | `_path` | 文档输出目录（绝对路径） | init 步骤 1 |
-| `_mermaidThemeInit` | Mermaid 主题初始化 `%%{init:{'theme':'dark/neutral'}}%%` | 每次指令执行前 |
+| `_mermaidThemeInit` | Mermaid 主题初始化 `%%{init: {"theme": "dark/neutral"}}%%` | 每次指令执行前 |
 | `_dateCmdFull` | 文档时间戳命令，如 `date '+%Y-%m-%d %H:%M'` | 每次指令执行前 |
 | `_dateCmdCompact` | 归档命名命令，如 `date '+%Y%m%d%H%M%S'` | 每次指令执行前 |
 
@@ -123,8 +123,8 @@ description: >
        - Linux:   gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null
        - macOS:   defaults read -g AppleInterfaceStyle 2>/dev/null
        - Windows: powershell -Command "(Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme"
-       结果含 "dark" 或 "0" → _mermaidThemeInit = "%%{init: {'theme':'dark'}}%%"
-       其他 → _mermaidThemeInit = "%%{init: {'theme':'neutral'}}%%"
+       结果含 "dark" 或 "0" → _mermaidThemeInit = '%%{init: {"theme": "dark"}}%%'
+       其他 → _mermaidThemeInit = '%%{init: {"theme": "neutral"}}%%'
 
        【任务 2 — 日期命令设置】
        Linux/macOS → _dateCmdFull = "date '+%Y-%m-%d %H:%M'", _dateCmdCompact = "date '+%Y%m%d%H%M%S'"
@@ -156,7 +156,7 @@ description: >
    ```
    如果子 agent 返回 null 或无效结果则报错退出。
 
-3. **文档生成（并行）** — 遍历 `modules`，每模块启动一个后台子 agent：
+3. **文档生成（并行）** — 遍历 `modules`，恒定 3 个并发启动后台子 agent：
 
    ```
    Agent:
@@ -172,7 +172,7 @@ description: >
 
        文档结构要求：
        - 上次修改：YYYY-MM-DD HH:mm（通过 {_dateCmdFull} 获取）
-       - "重点关注"checkbox 列表
+       - 重点关注
        - 功能概述
        - 核心概念（定义、作用、代码示例、三维评估）
        - 关键流程（Mermaid 图，首行 {_mermaidThemeInit}）
@@ -260,7 +260,7 @@ description: >
        }
    ```
 
-5. **文档整理（并行）** — 对 `docs` 中每个文档（排除 `摘要.md`）启动后台子 agent：
+5. **文档整理（并行）** — 对 `docs` 中每个文档（排除 `摘要.md`），恒定 3 个并发启动后台子 agent：
 
    ```
    Agent:
@@ -274,7 +274,7 @@ description: >
        读取当前内容，按以下标准整理：
        1) 分类归入正确章节（功能概述、核心概念、关键流程、文件说明等）
        2) 补充缺失元素（概念定义、代码示例、代码引用、三维评估）
-       3) 完善结构（补充"重点关注"checkbox、更新日期为 {_dateCmdFull}、修复 Mermaid 图）
+       3) 完善结构（补充重点关注、更新日期为 {_dateCmdFull}、修复 Mermaid 图）
        4) 不丢失任何原有有效信息
        5) 原有错误保留原文并标注修正建议
 
@@ -426,7 +426,7 @@ description: >
 4. **输出简洁**：非 `help` 指令执行完成后，只输出文件变更清单，不做延伸说明。
 5. **`_path` 记忆**：会话中 `init` 设定的 `_path` 可被 `reinit`/`update`/`byCase` 沿用。
 6. **归档保留**：`reinit` 生成的归档目录执行后保留，不会自动删除。
-7. **`run_in_background` 并发**：可并行任务（文档生成、整理）使用后台子 agent 同时执行。模块 >10 时每批 5-8 个并发，避免资源争抢。
+7. **`run_in_background` 并发**：可并行任务（文档生成、整理）使用后台子 agent 同时执行。恒定 3 个并发，避免资源争抢。
 8. **子 agent 返回结构**：要求返回 JSON 结构化结果，避免完整文件内容占用上下文。
 9. **子 agent 容错**：后台子 agent 可能返回 null 或无效结果。主 agent 应检查返回值，失败任务记录日志后继续其余任务。关键步骤失败则报错退出。
 10. **reinit 中断风险**：按"先归档再整理"顺序执行，若整理阶段中断，归档目录已存在但部分文档未更新。可对比 `archive_*` 与当前文档手动处理。
