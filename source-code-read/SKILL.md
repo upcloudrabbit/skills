@@ -3,8 +3,7 @@ name: source-code-read
 description: >
   源码阅读与文档生成技能。使用子 agent（Agent 工具）进行重分析以减小主上下文占用。
   从源码项目生成结构化 Markdown 文档。
-  TRIGGER: 当用户输入 /source-code-read，或提及"阅读源码"、"源码分析"、"code reading"、
-  "document code"、"项目文档"，或要求你分析一个项目时触发。
+  TRIGGER: 当用户输入 /source-code-read 时触发。
 ---
 
 # Source Code Read — 源码阅读与文档生成 Skill
@@ -72,6 +71,64 @@ description: >
 - **类图可见性标记**：`+` `-` `#` 必须紧跟属性/方法名，不能有空格
 - **禁用 HTML 标签**：Mermaid 不支持 `<br/>` 等 HTML 标签，换行用 `\n` 或 `</br>`
 
+#### Mermaid 语法校验
+
+每次生成或修改 Mermaid 图后，**必须自行校验语法正确性**，直至渲染通过：
+
+1. **写入后立即校验**：将 Mermaid 代码块写入文件后，立即自行审查校验
+2. **校验方式**：子 agent 根据 Mermaid 语法规范逐项检查生成的代码：
+   - 检查特殊字符是否已用双引号包裹（`( ) [ ] { }` 等）
+   - 检查参与者名称是否含空格，必要时用 `as` 起别名
+   - 检查关系/连线语法是否正确（箭头方向、`-->` `->>` 等）
+   - 检查 classDiagram/sequenceDiagram 等类型声明是否匹配实际语法
+   - 检查时序图 participant 声明是否正确
+   - 检查流程图节点定义是否完整
+   - 确认首行已插入 `{_mermaidThemeInit}`
+3. **修复与重试**：
+   - 发现问题 → 定位原因 → 修复 → 重新校验
+   - 循环直到校验通过，**最多重试 5 次**
+   - 超限后使用兜底方案（文本 UML / 文字流程 / 步骤列表）替代
+4. **常见失败原因排查**：
+   - 特殊字符未引号包裹 → 加双引号
+   - 节点 ID 含空格 → 改用驼峰或下划线
+   - 关系语法错误（如缺少 `:`） → 检查箭头/连线格式
+   - 缩进/换行问题 → 清理多余空白
+
+#### 流程图步骤编号与说明
+
+生成 `flowchart` 类型的 Mermaid 图时，必须遵守以下规范：
+
+1. **节点编号**：流程图的每个步骤节点使用分层编号命名，用节点 ID 中的数字序号表达层级与顺序：
+
+   | 层级 | 格式 | 示例 |
+   |------|------|------|
+   | 一级步骤 | `1` `2` `3` … | `1[解析请求]` |
+   | 二级子步骤 | `1.1` `1.2` `2.1` … | `1.1[验证参数]` |
+   | 三级子步骤 | `1.1.1` `1.1.2` … | `1.1.1[格式校验]` |
+
+2. **步骤说明表**：在 Mermaid 代码块下方紧跟着一个步骤说明列表或表格，详细说明每一步在做什么：
+
+   ````markdown
+   ```mermaid
+   {_mermaidThemeInit}
+   flowchart LR
+     1[解析请求] --> 1.1[验证参数]
+     1.1 --> 1.2[执行逻辑]
+     1.1 --> 1.3[降级处理]
+     1.2 --> 2[返回结果]
+   ```
+
+   | 步骤 | 说明 |
+   |------|------|
+   | 1 解析请求 | 从 HTTP 请求中提取参数和 body，反序列化为内部结构体 |
+   | 1.1 验证参数 | 校验必填字段、格式合法性，失败走 1.3 降级 |
+   | 1.2 执行逻辑 | 调用核心业务逻辑处理请求 |
+   | 1.3 降级处理 | 参数不合法时返回默认结果或错误码 |
+   | 2 返回结果 | 将处理结果序列化为 JSON 并写入响应体 |
+   ````
+
+3. **说明内容要求**：每步说明应包含「做了什么」+「关键决策或边界条件」（如有），如失败分支、数据流向等
+
 ### 3. 文档规范
 
 - **日期**：文档顶部标注 `YYYY-MM-DD HH:mm` 格式的上次修改时间，**必须通过操作系统日期命令获取**，不得由 agent 自行推断
@@ -84,12 +141,19 @@ description: >
 
 ### 4. 跨子 agent 变量
 
-| 变量 | 含义 | 设置时机 |
-|------|------|----------|
-| `_path` | 文档输出目录（绝对路径） | init 步骤 1 |
-| `_mermaidThemeInit` | Mermaid 主题初始化 `%%{init: {"theme": "dark/neutral"}}%%` | 每次指令执行前 |
-| `_dateCmdFull` | 文档时间戳命令，如 `date '+%Y-%m-%d %H:%M'` | 每次指令执行前 |
-| `_dateCmdCompact` | 归档命名命令，如 `date '+%Y%m%d%H%M%S'` | 每次指令执行前 |
+| 变量 | 含义 | 设置时机 | 获取方式 |
+|------|------|----------|----------|
+| `_path` | 文档输出目录（绝对路径） | init 步骤 1 | 用户确认 |
+| `_mermaidThemeInit` | Mermaid 主题初始化字符串（含 dark/neutral 主题） | 每次指令执行前 | `scripts/theme.sh` / `scripts/theme.ps1` |
+| `_dateCmdFull` | 文档时间戳命令（完整日期时间格式） | 每次指令执行前 | `scripts/date.sh` / `scripts/date.ps1` |
+| `_dateCmdCompact` | 文档时间戳命令（紧凑格式，用于归档命名） | 每次指令执行前 | `scripts/date.sh` / `scripts/date.ps1` |
+
+运行环境检测脚本时，先判断操作系统：
+- **Linux / macOS**：运行 `scripts/theme.sh` + `scripts/date.sh`
+- **Windows**：运行 `scripts/theme.ps1` + `scripts/date.ps1`
+
+各脚本输出 JSON 片段，子 agent 合并后得到 `_mermaidThemeInit`、`_dateCmdFull`、
+`_dateCmdCompact` 三个变量。
 
 ### 5. Prompt 转义注意事项
 
@@ -118,27 +182,38 @@ description: >
      prompt: |
        执行以下任务并按 JSON 返回结果：
 
-       【任务 1 — 系统主题检测】
-       检测当前系统主题并生成 Mermaid 主题变量：
-       - Linux:   gsettings get org.gnome.desktop.interface color-scheme 2>/dev/null
-       - macOS:   defaults read -g AppleInterfaceStyle 2>/dev/null
-       - Windows: powershell -Command "(Get-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -Name AppsUseLightTheme).AppsUseLightTheme"
-       结果含 "dark" 或 "0" → _mermaidThemeInit = '%%{init: {"theme": "dark"}}%%'
-       其他 → _mermaidThemeInit = '%%{init: {"theme": "neutral"}}%%'
+       【任务 1 — 运行环境检测脚本】
+       先判断操作系统，再按平台运行对应的检测脚本：
 
-       【任务 2 — 日期命令设置】
-       Linux/macOS → _dateCmdFull = "date '+%Y-%m-%d %H:%M'", _dateCmdCompact = "date '+%Y%m%d%H%M%S'"
-       Windows → _dateCmdFull = "powershell -Command \"Get-Date -Format 'yyyy-MM-dd HH:mm'\"", _dateCmdCompact = "powershell -Command \"Get-Date -Format 'yyyyMMddHHmmss'\""
+       a) **判断 OS**：
+          - Linux / macOS → 使用 .sh 脚本
+          - Windows → 使用 .ps1 脚本
 
-       【任务 3 — 项目环境检测】
-       检查 IDE MCP 工具是否可用；获取项目名称、技术栈、构建方式、许可证。
-       优先通过 IDE MCP 工具获取；否则回退到文件系统分析。
+       b) **查找并运行脚本**：
+          优先搜索 skill 安装目录下的 scripts/ 目录，回退搜索当前工作树。
+          
+          Linux/macOS 执行：
+            bash <脚本路径>/theme.sh    → 解析 JSON 得 mermaidTheme / mermaidThemeInit
+            bash <脚本路径>/date.sh     → 解析 JSON 得 dateCmdFull / dateCmdCompact
+          
+          Windows 执行：
+            powershell -File <脚本路径>/theme.ps1  → 解析 JSON 得 mermaidTheme / mermaidThemeInit
+            powershell -File <脚本路径>/date.ps1   → 解析 JSON 得 dateCmdFull / dateCmdCompact
 
-       【任务 4 — 模块扫描】
+       c) **脚本缺失或执行失败**：报错退出，所有环境变量必须由脚本提供，不设后备默认值。
+
+       【任务 2 — 项目环境检测】
+       1) **测试 IDE MCP**：尝试通过 IDE MCP 获取任意文件诊断或项目信息
+          - 成功 → 标记 hasIDE=true，后续使用 IDE MCP
+          - 失败 → 标记 hasIDE=false，后续不再使用 IDE MCP
+       2) 获取项目名称、技术栈、构建方式、许可证。
+          hasIDE=true 时优先通过 IDE MCP 获取；否则回退到文件系统分析。
+
+       【任务 3 — 模块扫描】
        扫描目录结构，识别主要模块/子系统。对每个模块给出中文名、路径、功能职责、核心文件（3-8 个）。
-       优先通过 IDE MCP 工具了解项目结构。
+       hasIDE=true 时优先通过 IDE MCP 工具了解项目结构；否则回退文件系统扫描。
 
-       【任务 5 — 创建输出目录】
+       【任务 4 — 创建输出目录】
        mkdir -p {_path}/images
 
        返回 JSON（必须严格匹配此结构）：
@@ -156,7 +231,7 @@ description: >
    ```
    如果子 agent 返回 null 或无效结果则报错退出。
 
-3. **文档生成（并行）** — 遍历 `modules`，恒定 3 个并发启动后台子 agent：
+3. **文档生成（并行）** — 遍历 `modules`，最多 3 个并发启动后台子 agent：
 
    ```
    Agent:
@@ -232,7 +307,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **检查目录下是否有文档**：无文档则提示需先有文档
-3. **启动环境子 agent**（同 init 步骤 2 的任务 1-2，返回 `_mermaidThemeInit` `_dateCmdFull` `_dateCmdCompact`）
+3. **启动环境子 agent**（运行 `scripts/theme.sh`/`theme.ps1` + `date.sh`/`date.ps1` 获取 `_mermaidThemeInit` `_dateCmdFull` `_dateCmdCompact`，详细步骤同 init 步骤 2 的【任务 1】）
 
 4. **归档备份 + 扫描现有文档**：
 
@@ -260,7 +335,7 @@ description: >
        }
    ```
 
-5. **文档整理（并行）** — 对 `docs` 中每个文档（排除 `摘要.md`），恒定 3 个并发启动后台子 agent：
+5. **文档整理（并行）** — 对 `docs` 中每个文档（排除 `摘要.md`），最多 3 个并发启动后台子 agent：
 
    ```
    Agent:
@@ -298,7 +373,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **解析用户需求**：明确目标文档、目标章节、变更内容
-3. **启动环境子 agent**（同 reinit 步骤 3）
+3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量，同 reinit 步骤 3）
 4. **更新目标文档**：
 
    ```
@@ -341,7 +416,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **理解场景**：让用户描述具体场景，明确涉及模块和入口点
-3. **启动环境子 agent**（同 reinit 步骤 3）
+3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量，同 reinit 步骤 3）
 4. **追溯源码**：
 
    ```
@@ -421,12 +496,12 @@ description: >
 ## 注意事项
 
 1. **主 agent 零文件操作**：主 agent 不得直接调用 Read/Edit/Write/Bash 等工具，所有文件操作、命令执行必须委托给子 agent。
-2. **IDE MCP 优先**：子 agent 分析源码时优先使用 IDE MCP 工具。
+2. **IDE MCP 可用性检测**：使用 IDE MCP 之前，先测试其是否正常可用。测试失败则当前操作及后续操作**全部不再使用 IDE MCP**，全部回退到文件系统分析。
 3. **绝不运行源码**：全程静态分析，不执行任何编译或运行命令。
 4. **输出简洁**：非 `help` 指令执行完成后，只输出文件变更清单，不做延伸说明。
 5. **`_path` 记忆**：会话中 `init` 设定的 `_path` 可被 `reinit`/`update`/`byCase` 沿用。
 6. **归档保留**：`reinit` 生成的归档目录执行后保留，不会自动删除。
-7. **`run_in_background` 并发**：可并行任务（文档生成、整理）使用后台子 agent 同时执行。恒定 3 个并发，避免资源争抢。
+7. **`run_in_background` 并发**：可并行任务（文档生成、整理）使用后台子 agent 同时执行。最多 3 个并发，避免资源争抢。
 8. **子 agent 返回结构**：要求返回 JSON 结构化结果，避免完整文件内容占用上下文。
 9. **子 agent 容错**：后台子 agent 可能返回 null 或无效结果。主 agent 应检查返回值，失败任务记录日志后继续其余任务。关键步骤失败则报错退出。
 10. **reinit 中断风险**：按"先归档再整理"顺序执行，若整理阶段中断，归档目录已存在但部分文档未更新。可对比 `archive_*` 与当前文档手动处理。
