@@ -52,6 +52,10 @@ description: >
 
 所有涉及画图场景，**统一优先使用 Mermaid**。每个 Mermaid 代码块**必须在首行插入 `{_mermaidThemeInit}`**。
 
+#### Mermaid 主题——必须原样插入脚本结果
+
+`_mermaidThemeInit` 的值由 `scripts/theme.sh` / `scripts/theme.ps1` 执行后返回（格式如 `%%{init: {"theme": "dark"}}%%`），**使用时必须直接粘贴脚本返回的原始字符串**，禁止对引号、花括号、百分号做任何转义、重包装或格式调整。脚本返回什么就插入什么，不做任何修改。
+
 | 场景 | 优先使用 | 兜底 |
 |------|----------|------|
 | 类继承/接口实现 | `` ```mermaid `` + `{_mermaidThemeInit}` + classDiagram | 文本 UML |
@@ -83,7 +87,8 @@ description: >
    - 检查 classDiagram/sequenceDiagram 等类型声明是否匹配实际语法
    - 检查时序图 participant 声明是否正确
    - 检查流程图节点定义是否完整
-   - 确认首行已插入 `{_mermaidThemeInit}`
+   - 确认首行已插入 `{_mermaidThemeInit}`（**必须原样插入脚本返回的原始字符串，禁止重转义**）
+   - 时序图额外校验：检查是否使用 `Note over` 标注了步骤编号，并在图后附有步骤说明表
 3. **修复与重试**：
    - 发现问题 → 定位原因 → 修复 → 重新校验
    - 循环直到校验通过，**最多重试 5 次**
@@ -128,6 +133,54 @@ description: >
    ````
 
 3. **说明内容要求**：每步说明应包含「做了什么」+「关键决策或边界条件」（如有），如失败分支、数据流向等
+
+#### 时序图步骤编号与说明
+
+生成 `sequenceDiagram` 类型的 Mermaid 图时，必须遵守以下规范：
+
+1. **消息编号**：每条消息使用 `Note over ...: N. 步骤说明` 的方式在图上嵌入步骤编号，用法与流程图编号一致：
+
+   | 层级 | 格式 | 示例 |
+   |------|------|------|
+   | 一级步骤 | `1.` `2.` `3.` … | `Note over A, B: 1. 发送请求` |
+   | 二级子步骤 | `1.1` `1.2` `2.1` … | `Note over B, C: 2.1 校验参数` |
+
+2. **步骤说明表**：在 Mermaid 代码块下方紧跟着一个步骤说明列表或表格，详细说明每一步在做什么：
+
+   ````markdown
+   ```mermaid
+   {_mermaidThemeInit}
+   sequenceDiagram
+     participant Client as 客户端
+     participant API as 网关
+     participant Svc as 服务层
+     participant DB as 数据库
+
+     Client->>API: HTTP POST /api/v1/create
+     Note over API: 1. 接收请求
+     API->>Svc: 调用 CreateService
+     Note over API, Svc: 1.1 协议转换
+     Svc->>DB: INSERT INTO ...
+     Note over Svc: 2. 持久化数据
+     DB-->>Svc: 返回 ID
+     Note over Svc: 2.1 处理返回值
+     Svc-->>API: 返回结果
+     Note over API: 3. 格式化响应
+     API-->>Client: 201 Created
+   ```
+
+   | 步骤 | 说明 |
+   |------|------|
+   | 1 接收请求 | 网关解析 HTTP 请求，提取参数并反序列化 |
+   | 1.1 协议转换 | 将 HTTP 请求转换为内部 RPC 调用格式 |
+   | 2 持久化数据 | 将业务实体写入数据库，含事务处理 |
+   | 2.1 处理返回值 | 将数据库返回的 ID 封装为领域对象 |
+   | 3 格式化响应 | 将内部结构序列化为 HTTP 响应 JSON |
+   ````
+
+3. **说明内容要求**：每步说明应包含「谁做什么」+「关键决策或边界条件」（如有），如异步回调、失败分支、数据流向等。
+
+4. **Note 与消息交替**：每条关键消息前后用 `Note over` 标注步骤序号，避免仅靠消息行文本承载编号。编号粒度以「一个逻辑步骤」为单位，不需每条消息都编号。
 
 ### 3. 文档规范
 
@@ -464,7 +517,7 @@ description: >
 
        ## 场景描述
        ## 涉及模块（| 模块 | 角色 |）
-       ## 调用时序图（Mermaid sequenceDiagram，首行 {_mermaidThemeInit}）
+       ## 调用时序图（Mermaid sequenceDiagram，首行 {_mermaidThemeInit}，使用 Note over 标注步骤编号并附步骤说明表）
        ## 核心源码解读（逐行注释 + 三维评估）
        ## 术语表
 
