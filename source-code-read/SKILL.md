@@ -1,8 +1,9 @@
 ---
 name: source-code-read
 description: >
-  源码阅读与文档生成技能。使用子 agent（Agent 工具）进行重分析以减小主上下文占用。
-  从源码项目生成结构化 Markdown 文档。
+  源码阅读与文档生成技能。使用子 agent（Agent 工具）进行重分析以减小主上下文占用，
+  后台子 agent 并发上限固定为 3。检测源码项目是否已由 IDE 打开并存在 IDE MCP；
+  可用时优先使用 IDE MCP 进行文件、索引、诊断、符号与搜索操作。从源码项目生成结构化 Markdown 文档。
   TRIGGER: 当用户输入 /source-code-read 时触发。
 ---
 
@@ -10,6 +11,9 @@ description: >
 
 使用 **子 agent（Agent 工具）** 编排，将源码分析、文档生成等重操作委托给
 独立的子 agent 执行，主 agent 只做路径确认、调度和结果汇总。
+
+后台子 agent **最多同时运行 3 个**。任何并行任务都必须按 3 个一组分批启动，
+前一批完成后再启动下一批，避免资源争抢和上下文结果混乱。
 
 ---
 
@@ -21,6 +25,7 @@ description: >
 | **子 agent** | 执行具体任务 | 环境检测、主题检测、日期命令设置、目录创建、源码分析、文档生成与修改、归档备份、摘要同步 | 调度决策、任务序列编排、跨任务传递上下文 |
 
 所有子 agent 统一使用 `subagent_type: general-purpose`。
+后台子 agent 并发数固定为 **3**，不得超过该上限。
 
 ---
 
@@ -47,8 +52,64 @@ description: >
 - 每一步的**具体工作**（文件操作、命令执行、代码分析、内容生成）必须由子 agent 完成
 - 主 agent 通过子 agent 返回的 JSON 结果传递上下文到下一步
 - 关键步骤（环境检测、模块扫描）子 agent 失败则报错退出；非关键步骤失败则记录日志后继续
+- 并行任务使用后台子 agent 时，**同一时间最多 3 个**；超过 3 个任务时按批次执行并等待批次完成
 
-### 2. 画图约定
+### 2. IDE MCP 访问策略
+
+每次需要读取或索引源码前，先检测源码项目是否已通过 IDE 打开，并检查当前 MCP 中是否存在 IDE 提供的能力。
+
+检测顺序：
+
+1. 确认源码根目录 `_sourcePath`：优先使用用户指定路径；未指定时使用当前工作区/当前项目根目录。
+2. 检查当前可用 MCP 工具或资源中是否存在 IDE 提供者，重点识别 workspace、diagnostics、file、search、symbols、definition、references、outline、index 等能力。
+3. 通过 IDE MCP 获取已打开 workspace/project/root 信息，确认其中包含 `_sourcePath` 或与 `_sourcePath` 指向同一项目。
+4. 路径匹配且至少一个 IDE MCP 操作成功时，标记 `hasIDE=true`，记录 `ideMcpProvider`、`ideWorkspacePath`、`ideCapabilities`。
+5. 未发现 IDE MCP、IDE 未打开目标源码、路径不匹配或探测失败时，标记 `hasIDE=false`，记录失败原因。
+
+访问优先级：
+
+- `hasIDE=true` 时，源码读取、目录/文件列表、全文搜索、符号搜索、定义/引用跳转、诊断、项目索引、模块关系分析等操作必须优先使用 IDE MCP。
+- `hasIDE=true` 时，不要直接用 Bash 扫描源码树、`grep`/`rg` 搜索源码、`find` 列目录或读取源码文件；只有 IDE MCP 缺少对应能力或单次调用失败时，才可使用文件系统工具兜底，并记录原因。
+- `hasIDE=false` 时，允许使用文件系统工具进行静态分析；仍然禁止运行源码、编译、测试或启动服务。
+- 文件系统兜底扫描时排除 `.git`、`node_modules`、`dist`、`build`、`target`、`out`、`.next`、`.gradle`、`.idea`、`.vscode`、`archive_*` 等低价值或生成目录，除非用户明确要求分析这些目录。
+- Bash 允许用于执行本 skill 自带的 `scripts/theme.*`、`scripts/date.*`，以及没有 MCP 能力覆盖的归档/目录创建等文档输出操作。
+- 子 agent 返回 JSON 时必须带上 `hasIDE`、`ideMcpProvider`、`ideWorkspacePath`、`ideCapabilities`、`ideFallbackReason`，供后续子 agent 继承访问策略。
+
+### 3. 子 agent 返回与状态传递
+
+主 agent 只保存和传递结构化状态，不接收完整文件正文。所有子 agent 返回 JSON 时遵守以下约定：
+
+- 必填字段：`status`、`filePath` 或 `affectedFiles`、`warnings`、`errors`。
+- 源码相关任务附加：`hasIDE`、`ideFallbackReason`、`sourceRefs`、`optimizationSuggestions`。
+- 文档相关任务附加：`updatedSections`、`needsSummaryUpdate`、`qualityChecks`。
+- `warnings` 用于记录非阻断问题；`errors` 非空时主 agent 判断是否中断。
+- 后续子 agent 只接收必要摘要、路径、变量和 JSON 结果，不传递完整文档正文，避免主上下文膨胀。
+
+`qualityChecks` 至少包含：
+
+```json
+{
+  "hasDate": true,
+  "hasFocusSections": true,
+  "hasCodeRefs": true,
+  "mermaidChecked": true,
+  "summarySynced": true
+}
+```
+
+### 4. 优化建议
+
+完成 `init`、`reinit`、`update` 或 `byCase` 后，如子 agent 在源码结构、文档结构或实现分析中发现明确优化点，最终输出可附加一个简短的“优化建议”小节。
+
+优化建议要求：
+
+- 只提出基于已分析证据的建议，避免泛泛而谈
+- 每条建议说明目标位置、问题、建议动作和收益/风险
+- 优先提出架构边界、模块职责、重复逻辑、错误处理、可测试性、性能瓶颈、文档缺口等可执行改进
+- 控制在 1-5 条；没有明确优化点时不强行输出
+- 不替代文件变更清单，放在完成清单之后
+
+### 5. 画图约定
 
 所有涉及画图场景，**统一优先使用 Mermaid**。每个 Mermaid 代码块**必须在首行插入 `{_mermaidThemeInit}`**。
 
@@ -182,7 +243,7 @@ description: >
 
 4. **Note 与消息交替**：每条关键消息前后用 `Note over` 标注步骤序号，避免仅靠消息行文本承载编号。编号粒度以「一个逻辑步骤」为单位，不需每条消息都编号。
 
-### 3. 文档规范
+### 6. 文档规范
 
 - **日期**：文档顶部标注 `YYYY-MM-DD HH:mm` 格式的上次修改时间，**必须通过操作系统日期命令获取**，不得由 agent 自行推断
 - **命名**：文档名用**中文**（术语表等保留原文的除外）
@@ -191,12 +252,16 @@ description: >
 - **重点关注**：文档开头列出重点章节
 - **三维评估**：关键代码分析**好处**（为什么）、**替代方案**（其他方式及权衡）、**风险**（不这么实现的问题）
 - **摘要同步**：新增/删除/改名文档或内容大改时，同步更新 `摘要.md` 的模块功能摘要表
+- **质量门禁**：保存前检查日期、重点关注、代码引用、Mermaid 首行、步骤说明表、摘要同步标记；缺失则修复后再返回成功
 
-### 4. 跨子 agent 变量
+### 7. 跨子 agent 变量
 
 | 变量 | 含义 | 设置时机 | 获取方式 |
 |------|------|----------|----------|
+| `_sourcePath` | 源码项目根目录（绝对路径） | init 步骤 1 / 用户指定 | 用户确认或当前工作区 |
 | `_path` | 文档输出目录（绝对路径） | init 步骤 1 | 用户确认 |
+| `_ideAccess` | IDE MCP 访问策略与检测结果 | 每次需要读取源码前 | IDE MCP 访问策略检测 |
+| `_runState` | 本次执行的结构化状态摘要 | 每个子 agent 完成后 | 子 agent JSON 返回 |
 | `_mermaidThemeInit` | Mermaid 主题初始化字符串（含 dark/neutral 主题） | 每次指令执行前 | `scripts/theme.sh` / `scripts/theme.ps1` |
 | `_dateCmdFull` | 文档时间戳命令（完整日期时间格式） | 每次指令执行前 | `scripts/date.sh` / `scripts/date.ps1` |
 | `_dateCmdCompact` | 文档时间戳命令（紧凑格式，用于归档命名） | 每次指令执行前 | `scripts/date.sh` / `scripts/date.ps1` |
@@ -208,7 +273,7 @@ description: >
 各脚本输出 JSON 片段，子 agent 合并后得到 `_mermaidThemeInit`、`_dateCmdFull`、
 `_dateCmdCompact` 三个变量。
 
-### 5. Prompt 转义注意事项
+### 8. Prompt 转义注意事项
 
 | 问题 | 规则 |
 |------|------|
@@ -222,10 +287,11 @@ description: >
 
 ### 执行流程
 
-1. **确认输出路径 `_path`**：
-   - 新会话：询问用户绝对路径
+1. **确认源码根目录 `_sourcePath` 与输出路径 `_path`**：
+   - `_sourcePath`：优先使用用户指定的源码路径；未指定时使用当前工作区/当前项目根目录
+   - `_path`：新会话询问用户绝对路径
    - 如路径下已有文件：列出文件列表，询问是否继续使用
-   - 在同一会话中记住 `_path`
+   - 在同一会话中记住 `_sourcePath` 和 `_path`
 
 2. **启动初始化子 agent**（环境准备 + 项目分析合并为一个子 agent）：
 
@@ -256,30 +322,44 @@ description: >
        c) **脚本缺失或执行失败**：报错退出，所有环境变量必须由脚本提供，不设后备默认值。
 
        【任务 2 — 项目环境检测】
-       1) **测试 IDE MCP**：尝试通过 IDE MCP 获取任意文件诊断或项目信息
-          - 成功 → 标记 hasIDE=true，后续使用 IDE MCP
-          - 失败 → 标记 hasIDE=false，后续不再使用 IDE MCP
+       源码根目录：{_sourcePath}
+       1) **检测 IDE 打开状态与 IDE MCP**：
+          - 检查当前 MCP 工具/资源中是否存在 IDE 提供者
+          - 通过 IDE MCP 获取已打开 workspace/project/root
+          - 确认已打开项目包含 {_sourcePath} 或与其为同一源码项目
+          - 尝试一次轻量 IDE MCP 操作（如 workspace 信息、文件诊断、符号/索引查询）
+          - 路径匹配且调用成功 → 标记 hasIDE=true，后续源码读取、搜索、索引、诊断、符号跳转优先使用 IDE MCP
+          - 未发现 IDE MCP、IDE 未打开目标源码、路径不匹配或调用失败 → 标记 hasIDE=false，并记录 ideFallbackReason
        2) 获取项目名称、技术栈、构建方式、许可证。
           hasIDE=true 时优先通过 IDE MCP 获取；否则回退到文件系统分析。
 
        【任务 3 — 模块扫描】
        扫描目录结构，识别主要模块/子系统。对每个模块给出中文名、路径、功能职责、核心文件（3-8 个）。
-       hasIDE=true 时优先通过 IDE MCP 工具了解项目结构；否则回退文件系统扫描。
+       hasIDE=true 时必须优先通过 IDE MCP 的 workspace/search/symbol/index 能力了解项目结构；只有缺少能力或调用失败时才回退文件系统扫描，并记录原因。
+       文件系统兜底扫描时排除 .git、node_modules、dist、build、target、out、.next、.gradle、.idea、.vscode、archive_* 等目录。
 
        【任务 4 — 创建输出目录】
        mkdir -p {_path}/images
 
        返回 JSON（必须严格匹配此结构）：
        {
+         "status": "ok",
          "_mermaidThemeInit": "...",
          "_dateCmdFull": "...",
          "_dateCmdCompact": "...",
+         "_sourcePath": "...",
          "projectName": "...", "techStack": "...", "buildMethod": "...",
          "language": "...", "license": "...", "hasIDE": true/false,
+         "ideMcpProvider": "...或null",
+         "ideWorkspacePath": "...或null",
+         "ideCapabilities": ["workspace", "search", "symbols"],
+         "ideFallbackReason": "...或null",
          "projectScale": "...", "totalFiles": 0,
          "modules": [
            { "name": "模块中文名", "path": "src/xxx", "description": "功能职责", "keyFiles": ["文件1", "文件2"] }
-         ]
+         ],
+         "warnings": [],
+         "errors": []
        }
    ```
    如果子 agent 返回 null 或无效结果则报错退出。
@@ -297,6 +377,7 @@ description: >
        文档命名：{模块名}.md（中文名）
        日期命令：{_dateCmdFull}
        Mermaid 主题：{_mermaidThemeInit}
+       IDE MCP 访问策略：hasIDE={hasIDE}, provider={ideMcpProvider}, workspace={ideWorkspacePath}, capabilities={ideCapabilities}, fallbackReason={ideFallbackReason}
 
        文档结构要求：
        - 上次修改：YYYY-MM-DD HH:mm（通过 {_dateCmdFull} 获取）
@@ -312,10 +393,32 @@ description: >
        画图优先 Mermaid，首行插入 {_mermaidThemeInit}。
 
        先读取源码深入理解，关键文件参考：{keyFiles}。
+       若 hasIDE=true，源码读取、搜索、索引、诊断、符号/引用跳转必须优先使用 IDE MCP；只有 IDE MCP 缺少能力或调用失败时才可回退文件系统工具，并在返回 JSON 中说明原因。
        写入 {_path}/{模块名}.md。
+
+       完成后返回 JSON：
+       {
+         "filePath": "{_path}/{模块名}.md",
+         "status": "created",
+         "hasIDE": true/false,
+         "ideFallbackReason": "...或null",
+         "sourceRefs": ["相对路径1", "相对路径2"],
+         "qualityChecks": {
+           "hasDate": true,
+           "hasFocusSections": true,
+           "hasCodeRefs": true,
+           "mermaidChecked": true,
+           "summarySynced": false
+         },
+         "optimizationSuggestions": [
+           { "target": "相对路径或文档章节", "problem": "问题", "action": "建议动作", "benefitOrRisk": "收益或风险" }
+         ],
+         "warnings": [],
+         "errors": []
+       }
    ```
 
-4. **等待所有后台子 agent 完成**，汇总各模块文档创建状态。
+4. **等待所有后台子 agent 完成**，汇总各模块文档创建状态和 `optimizationSuggestions`。
 
 5. **生成 摘要.md**：
 
@@ -342,6 +445,22 @@ description: >
 
        ## 架构总览
        Mermaid graph，首行 {_mermaidThemeInit}
+
+       返回 JSON：
+       {
+         "filePath": "{_path}/摘要.md",
+         "status": "created",
+         "moduleCount": 0,
+         "qualityChecks": {
+           "hasDate": true,
+           "hasFocusSections": true,
+           "hasCodeRefs": true,
+           "mermaidChecked": true,
+           "summarySynced": true
+         },
+         "warnings": [],
+         "errors": []
+       }
    ```
 
 6. **输出结果**：
@@ -350,6 +469,9 @@ description: >
      - 创建 认证模块.md
      - 创建 核心引擎.md
      - 创建 摘要.md
+
+   优化建议：
+     - 建议拆分 src/auth/AuthService.ts 中的认证与权限校验职责，降低后续扩展风险。
    ```
 
 ---
@@ -360,7 +482,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **检查目录下是否有文档**：无文档则提示需先有文档
-3. **启动环境子 agent**（运行 `scripts/theme.sh`/`theme.ps1` + `date.sh`/`date.ps1` 获取 `_mermaidThemeInit` `_dateCmdFull` `_dateCmdCompact`，详细步骤同 init 步骤 2 的【任务 1】）
+3. **启动环境子 agent**（运行 `scripts/theme.sh`/`theme.ps1` + `date.sh`/`date.ps1` 获取 `_mermaidThemeInit` `_dateCmdFull` `_dateCmdCompact`；如果后续需要读取源码，同步执行 IDE MCP 访问策略检测）
 
 4. **归档备份 + 扫描现有文档**：
 
@@ -381,10 +503,13 @@ description: >
 
        返回 JSON：
        {
+         "status": "ok",
          "archivePath": "...", "fileCount": 0, "summaryExists": true/false,
          "docs": [
            { "path": "认证模块.md", "title": "认证模块", "sections": ["功能概述", "核心概念"] }
-         ]
+         ],
+         "warnings": [],
+         "errors": []
        }
    ```
 
@@ -406,16 +531,36 @@ description: >
        4) 不丢失任何原有有效信息
        5) 原有错误保留原文并标注修正建议
 
-       完成后保存文件。
+       完成后保存文件，并返回 JSON：
+       {
+         "filePath": "{_path}/{文档路径}",
+         "status": "updated",
+         "updatedSections": ["..."],
+         "qualityChecks": {
+           "hasDate": true,
+           "hasFocusSections": true,
+           "hasCodeRefs": true,
+           "mermaidChecked": true,
+           "summarySynced": false
+         },
+         "optimizationSuggestions": [
+           { "target": "相对路径或文档章节", "problem": "问题", "action": "建议动作", "benefitOrRisk": "收益或风险" }
+         ],
+         "warnings": [],
+         "errors": []
+       }
    ```
 
-6. **等待所有后台子 agent 完成**。
+6. **等待所有后台子 agent 完成**，汇总文档整理状态和 `optimizationSuggestions`。
 7. **重构 摘要.md**（同 init 摘要生成，参考原始 摘要.md 保留项目概览信息）。
 8. **输出结果**：
    ```
    reinit 完成（原始文档已归档至 {archivePath}）：
      - 更新 文档1.md
      - 更新 摘要.md
+
+   优化建议：
+     - 建议补齐 核心引擎.md 的异常分支说明，方便后续排查失败链路。
    ```
 
 ---
@@ -426,7 +571,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **解析用户需求**：明确目标文档、目标章节、变更内容
-3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量，同 reinit 步骤 3）
+3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量；如果本次更新需要读取源码，同步执行 IDE MCP 访问策略检测）
 4. **更新目标文档**：
 
    ```
@@ -447,7 +592,24 @@ description: >
        5) 保存文件
 
        返回 JSON：
-       { "filePath": "...", "updatedSections": ["章节1"], "needsSummaryUpdate": true/false }
+       {
+         "filePath": "...",
+         "status": "updated",
+         "updatedSections": ["章节1"],
+         "needsSummaryUpdate": true/false,
+         "qualityChecks": {
+           "hasDate": true,
+           "hasFocusSections": true,
+           "hasCodeRefs": true,
+           "mermaidChecked": true,
+           "summarySynced": false
+         },
+         "optimizationSuggestions": [
+           { "target": "相对路径或文档章节", "problem": "问题", "action": "建议动作", "benefitOrRisk": "收益或风险" }
+         ],
+         "warnings": [],
+         "errors": []
+       }
    ```
 
 5. **按需同步摘要**：
@@ -459,6 +621,9 @@ description: >
    update 完成：
      - 更新 {targetDoc}.md
      - 同步 摘要.md
+
+   优化建议：
+     - 建议在 {targetDoc}.md 增加关键入口的测试场景说明，降低后续维护成本。
    ```
 
 ---
@@ -469,7 +634,7 @@ description: >
 
 1. **确认输出路径**（可沿用 `_path`）
 2. **理解场景**：让用户描述具体场景，明确涉及模块和入口点
-3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量，同 reinit 步骤 3）
+3. **启动环境子 agent**（运行 `scripts/` 下 `.sh`/`.ps1` 脚本获取变量，并执行 IDE MCP 访问策略检测）
 4. **追溯源码**：
 
    ```
@@ -477,11 +642,12 @@ description: >
      description: 追溯源码 - {场景前 20 字}
      prompt: |
        追溯源码实现：{scenario}
+       IDE MCP 访问策略：hasIDE={hasIDE}, provider={ideMcpProvider}, workspace={ideWorkspacePath}, capabilities={ideCapabilities}, fallbackReason={ideFallbackReason}
 
        溯源要求：
        1) 理解场景范围、模块、入口点、边界条件
        2) 从入口点逐层追溯调用链路
-       3) 使用 IDE MCP 工具或文件搜索工具追溯
+       3) hasIDE=true 时优先使用 IDE MCP 的搜索、索引、符号、定义、引用、诊断能力追溯；仅在缺少能力或调用失败时回退文件搜索工具，并记录原因
        4) 绝不运行源码——全程静态分析
        5) 记录完整调用栈和关键实现位置
        6) 识别核心参与者（模块/类/函数）
@@ -492,7 +658,15 @@ description: >
          "participants": [{ "name": "...", "role": "..." }],
          "callSteps": [{ "from": "...", "to": "...", "action": "...", "fileRef": "...", "isAsync": false }],
          "keyCodeSnippets": [{ "title": "...", "filePath": "...", "description": "..." }],
-         "involvedModules": ["模块1"]
+         "involvedModules": ["模块1"],
+         "hasIDE": true/false,
+         "ideFallbackReason": "...或null",
+         "sourceRefs": ["相对路径1", "相对路径2"],
+         "optimizationSuggestions": [
+           { "target": "相对路径或文档章节", "problem": "问题", "action": "建议动作", "benefitOrRisk": "收益或风险" }
+         ],
+         "warnings": [],
+         "errors": []
        }
    ```
 
@@ -522,6 +696,22 @@ description: >
        ## 术语表
 
        保存到 {_path}/{场景名}.md。
+
+       返回 JSON：
+       {
+         "filePath": "{_path}/{场景名}.md",
+         "status": "created",
+         "updatedSections": ["场景描述", "涉及模块", "调用时序图", "核心源码解读", "术语表"],
+         "qualityChecks": {
+           "hasDate": true,
+           "hasFocusSections": true,
+           "hasCodeRefs": true,
+           "mermaidChecked": true,
+           "summarySynced": false
+         },
+         "warnings": [],
+         "errors": []
+       }
    ```
 
 6. **同步摘要**：在 {_path}/摘要.md 的模块功能摘要表中新增此行文档记录。如已有则只更新描述。
@@ -530,6 +720,9 @@ description: >
    byCase 完成：
      - 创建 {场景名}.md（涉及 {N} 个模块，{M} 步调用）
      - 同步 摘要.md
+
+   优化建议：
+     - 建议为 {场景名} 的失败分支补充幂等处理说明，避免重试导致状态不一致。
    ```
 
 ---
@@ -549,12 +742,12 @@ description: >
 ## 注意事项
 
 1. **主 agent 零文件操作**：主 agent 不得直接调用 Read/Edit/Write/Bash 等工具，所有文件操作、命令执行必须委托给子 agent。
-2. **IDE MCP 可用性检测**：使用 IDE MCP 之前，先测试其是否正常可用。测试失败则当前操作及后续操作**全部不再使用 IDE MCP**，全部回退到文件系统分析。
+2. **IDE MCP 访问优先**：读取或索引源码前，先确认目标源码已由 IDE 打开且当前 MCP 存在 IDE 提供者。检测通过后，文件读取、搜索、索引、诊断、符号、定义/引用跳转必须优先使用 IDE MCP；只有缺少能力或调用失败时才回退文件系统工具，并记录原因。
 3. **绝不运行源码**：全程静态分析，不执行任何编译或运行命令。
-4. **输出简洁**：非 `help` 指令执行完成后，只输出文件变更清单，不做延伸说明。
+4. **输出简洁**：非 `help` 指令执行完成后，先输出文件变更清单；如发现明确优化点，可追加简短优化建议。
 5. **`_path` 记忆**：会话中 `init` 设定的 `_path` 可被 `reinit`/`update`/`byCase` 沿用。
 6. **归档保留**：`reinit` 生成的归档目录执行后保留，不会自动删除。
-7. **`run_in_background` 并发**：可并行任务（文档生成、整理）使用后台子 agent 同时执行。最多 3 个并发，避免资源争抢。
+7. **`run_in_background` 并发硬约束**：可并行任务（文档生成、整理）使用后台子 agent 批量执行，同一时间最多 3 个后台子 agent。不得一次性启动超过 3 个，剩余任务等待当前批次完成后再继续。
 8. **子 agent 返回结构**：要求返回 JSON 结构化结果，避免完整文件内容占用上下文。
 9. **子 agent 容错**：后台子 agent 可能返回 null 或无效结果。主 agent 应检查返回值，失败任务记录日志后继续其余任务。关键步骤失败则报错退出。
 10. **reinit 中断风险**：按"先归档再整理"顺序执行，若整理阶段中断，归档目录已存在但部分文档未更新。可对比 `archive_*` 与当前文档手动处理。
